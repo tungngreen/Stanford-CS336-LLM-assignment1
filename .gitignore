@@ -1,3 +1,28 @@
+# config/cache
+.config
+.dotnet
+.ssh
+.local
+.vscode-server
+.bash_history
+.bashrc
+.zshrc
+.profile
+.python_history
+.gnupg
+.gitconfig
+.viminfo
+.*
+
+# data
+data
+
+# token
+token
+
+# visualization
+wandb
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

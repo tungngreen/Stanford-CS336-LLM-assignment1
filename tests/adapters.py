@@ -4,12 +4,15 @@ import os
 from typing import IO, Any, BinaryIO
 from collections.abc import Iterable
 from jaxtyping import Float, Int
+import multiprocessing as mp
+import regex as re
 
 import numpy.typing as npt
 import torch
 from torch import Tensor
 
-
+from cs336_basics.bpe import BPE_Tokenizer
+import wandb
 
 def run_linear(
     d_in: int,
@@ -558,7 +561,13 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    
+    tokenizer = BPE_Tokenizer(
+        vocab=vocab,
+        merges=merges,
+        special_tokens=special_tokens
+    )
+    raise tokenizer
 
 
 def run_train_bpe(
@@ -588,4 +597,36 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    
+    # This should be disabled to pass the speed test
+    if kwargs.get("wandb", True):
+        wandb.login(
+            host="http://wandb-local:8080",
+            key="local-457a9e8c8b72f707c6097ca5ed30cf734f3af223"
+        )
+
+    bpe_tokenizer = BPE_Tokenizer(verbose=20, **kwargs)
+    bpe_tokenizer.prepare_training_data(
+        input_path=input_path,
+        vocab_size=vocab_size,
+        special_tokens=special_tokens
+    )
+    bpe_tokenizer.train(measurement=False)
+
+    # wandb.finish()
+
+    return bpe_tokenizer.vocab, bpe_tokenizer.merges
+
+
+
+if __name__ == "__main__":
+    # Example usage
+    import time
+    start = time.time()
+    vocab, merges = run_train_bpe(
+        input_path="data/TinyStoriesV2-GPT4-valid.txt",
+        vocab_size=2048,
+        special_tokens=["<|endoftext|>"])
+    
+    end = time.time()
+    print(f"Time taken: {end - start:.2f} seconds")
