@@ -3,6 +3,52 @@ import regex as re
 from collections import Counter
 from typing import List, Union, Tuple, Dict
 from io import BytesIO
+import pickle
+
+import multiprocessing as mp
+
+def save_with_pickle(vocab_filepath: str, merges_filepath: str, vocab: dict[int, bytes], merges: List[tuple[bytes, bytes]]):
+    """Saves vocab and merges using pickle."""
+    try:
+        # Save vocabulary
+        with open(vocab_filepath, 'wb') as f: # 'wb' for binary write
+            pickle.dump(vocab, f)
+        print(f"Vocabulary saved to {vocab_filepath}")
+
+        # Save merges
+        with open(merges_filepath, 'wb') as f: # 'wb' for binary write
+            pickle.dump(merges, f)
+        print(f"Merges saved to {merges_filepath}")
+
+    except Exception as e:
+        print(f"Error saving with pickle: {e}")
+
+# --- Deserialization (Loading) ---
+def load_with_pickle(vocab_filepath: str, merges_filepath: str) -> tuple[dict[int, bytes], List[tuple[bytes, bytes]]]:
+    """Loads vocab and merges using pickle."""
+    vocab = None
+    merges = None
+    try:
+        # Load vocabulary
+        with open(vocab_filepath, 'rb') as f: # 'rb' for binary read
+            vocab = pickle.load(f)
+        print(f"Vocabulary loaded from {vocab_filepath}")
+
+        # Load merges
+        with open(merges_filepath, 'rb') as f: # 'rb' for binary read
+            merges = pickle.load(f)
+        print(f"Merges loaded from {merges_filepath}")
+
+    except FileNotFoundError:
+        print("Error: Vocab or merges file not found.")
+        # Depending on your needs, you might return None, raise the error, or return empty structures
+        raise # Re-raise the file not found error
+    except Exception as e:
+        print(f"Error loading with pickle: {e}")
+        raise # Re-raise other exceptions
+
+    return vocab, merges
+
 
 def get_pair_stats(
     pretoken_freq: Dict[bytes, Tuple[List[bytes], int]]
