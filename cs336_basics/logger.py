@@ -46,6 +46,27 @@ class Logger:
             print(f"Logger '{name}' configured successfully.", file=sys.stderr)
         else:
             print(f"Logger '{name}' already has handlers configured. Skipping setup.", file=sys.stderr)
+            
+    def info(self, message: str, *args, **kwargs):
+        """Log an info message."""
+        self._logger.info(message, *args, **kwargs)
+    def debug(self, message: str, *args, **kwargs):
+        """Log a debug message."""
+        self._logger.debug(message, *args, **kwargs)
+    def warning(self, message: str, *args, **kwargs):
+        """Log a warning message."""
+        self._logger.warning(message, *args, **kwargs)
+    def error(self, message: str, *args, **kwargs):
+        """Log an error message."""
+        self._logger.error(message, *args, **kwargs)
+    def critical(self, message: str, *args, **kwargs):
+        """Log a critical message."""
+        self._logger.critical(message, *args, **kwargs)
+        self._logger.exception(message, *args, **kwargs)
+    def exception(self, message: str, *args, **kwargs):
+        """Log an exception message."""
+        self._logger.exception(message, *args, **kwargs)
+        print(f"Exception logged: {message}", file=sys.stderr)
 
 
 # --- Example Usage ---
