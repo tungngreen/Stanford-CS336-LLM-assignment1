@@ -1,7 +1,7 @@
 import os
 import regex as re
 from collections import Counter
-from typing import List, Tuple
+from typing import List, Tuple, Iterable, Iterator
 from io import BytesIO
 import wandb
 import time
@@ -9,7 +9,9 @@ import time
 import multiprocessing as mp
 
 from cs336_basics.utils import find_chunk_boundaries, process_chunk,get_pair_stats, \
-                               merge_byte_pairs, load_with_pickle
+                               merge_byte_pairs, load_with_pickle, split_chunk
+from cs336_basics.trie import BPETrie                               
+
 import cProfile
 
 class BPE_Tokenizer:
@@ -23,8 +25,8 @@ class BPE_Tokenizer:
     """
     
     # GPT2-style regex pattern for splitting the text into potential initial tokens
-    split_pattern_bytes = br"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""" 
-    split_pattern_bytes = re.compile(split_pattern_bytes)
+    split_byte_patterns = br"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""" 
+    split_byte_patterns = re.compile(split_byte_patterns)
     
     def __init__(
         self,
@@ -48,7 +50,10 @@ class BPE_Tokenizer:
         """
         self.special_tokens = special_tokens
         
+        # ID to token mapping vocab
         self.vocab = vocab
+        # Token to ID mapping vocab
+        self.vocab_reverse = {v: k for k, v in vocab.items()}
         self.merges = merges
         self.vocab_size = len(vocab)
         self.merges_size = len(merges)
@@ -63,12 +68,15 @@ class BPE_Tokenizer:
                 level=verbose,  # INFO level
             )
             
-        if self.vocab is None and self.merges is None:
+        if len(self.vocab) == 0 or len(self.merges) == 0:
             self.logger._logger.info("Empty tokenizer has been created.")
             
             return
-            
-        self.logger._logger.info("Tokenizer loaded with a vocabulary of size {} and merges of size {}".format(
+        
+        self.vocab_reverse = {v: k for k, v in self.vocab.items()}
+
+        self.bpe_trie = BPETrie(self.vocab_reverse)
+        self.logger._logger.info("Tokenizer has been created with a vocabulary of size {} and merges of size {}".format(
             self.vocab_size, self.merges_size
         ))
         
@@ -76,6 +84,7 @@ class BPE_Tokenizer:
             self.logger._logger.debug("Special tokens: {}".format(self.special_tokens))
         else:
             self.logger._logger.warning("No special tokens provided.")
+        self._handle_special_tokens(special_tokens)
 
     def from_files(
         self,
@@ -99,7 +108,7 @@ class BPE_Tokenizer:
         
         if special_tokens is not None:
             self.special_tokens = special_tokens
-            self._handle_special_tokens(special_tokens)
+        self._handle_special_tokens(special_tokens)
 
         self.vocab_size = len(self.vocab)
         self.merges_size = len(self.merges)
@@ -108,6 +117,9 @@ class BPE_Tokenizer:
         if self.vocab is None or self.merges is None:
             self.logger._logger.warning("Tokenizer loaded with empty vocabulary or merges.")
             return
+        
+        self.vocab_reverse = {v: k for k, v in self.vocab.items()}
+        self.bpe_trie = BPETrie(self.vocab_reverse)
         
         self.logger._logger.info("Tokenizer loaded with a vocabulary of size {} and merges of size {}".format(
             self.vocab_size, self.merges_size
@@ -133,9 +145,12 @@ class BPE_Tokenizer:
         # We work with bytes because the training data is read as bytes.
         self.encoded_special_tokens = []
         
+        self.special_token_ids = []
+        
         if tokens:
             # Encode the tokens to bytes
             self.encoded_special_tokens = [token.encode("utf-8") for token in tokens]
+            self.special_token_ids = [self.vocab_reverse[token] for token in self.encoded_special_tokens if token in self.vocab_reverse]
 
     def prepare_training_data(self,
         input_path: str | os.PathLike,
@@ -322,7 +337,7 @@ class BPE_Tokenizer:
         # Each task is a tuple containing the arguments for the process_chunk function
         tasks = [
             (self.file_object[chunk_boundaries[i]:chunk_boundaries[i + 1]], 
-             self.split_pattern_bytes,
+             self.split_byte_patterns,
              self.encoded_special_tokens,
              self.logger._logger)
             for i in range(num_processes)
@@ -499,7 +514,143 @@ class BPE_Tokenizer:
                 
         return self.vocab, self.merges
     
-    def encode(self, text: str) -> List[int]:
+    def encode_segment_trie(self, segment: bytes) -> List[int]:
+        """
+        Encode a segment of bytes using using Trie longest match.
+        
+        Parameters
+        ----------
+        segment : bytes
+            The input segment to be encoded.
+
+        Returns
+        -------
+        list[int]
+            A list of token IDs representing the encoded segment.
+        """
+        
+        # Initialize an empty list to store the encoded result
+        encoded_result = []
+        i = 0
+        
+        j = 0
+        while j < len(segment):
+            # Find the longest match in the trie
+            token_id, matched_len = self.bpe_trie.longest_match(segment, j)
+            
+            if matched_len > 0:
+                # We found the longest possible match
+                # Append the token ID to the encoded result
+                encoded_result.append(token_id)
+                # Move the index forward by the length of the matched token
+                j += matched_len
+            else:
+                self.logger._logger.warning("Un-tokenizable sequence found at index {}, {}".format(j, segment[j:j+1])) 
+                j += 1
+                
+        return encoded_result
+    
+    def merge_byte_pairs(
+        self,
+        pretoken: List[bytes],
+    ) -> List[bytes]:
+        """
+        Merge the byte pairs in the pretoken list.
+        
+        Parameters
+        ----------
+        pretoken : List[bytes]
+            The input pretoken list to be merged.
+
+        Returns
+        -------
+        List[bytes]
+            A list of merged byte pairs.
+        """
+        
+        for merge in self.merges:
+            i = 0
+            merged_result = []
+            while i < len(pretoken):
+                if i == len(pretoken) - 1:
+                    # If we are at the last pretoken, just append it
+                    merged_result.append(pretoken[i])
+                    i += 1
+                    break
+                if pretoken[i] == merge[0] and pretoken[i + 1] == merge[1]:
+                    # Merge the byte pairs
+                    merged_result.append(merge[0] + merge[1])
+                    i += 2
+                else:
+                    merged_result.append(pretoken[i])
+                    i += 1
+            pretoken = merged_result
+            if len(pretoken) == 1:
+                # If we have only one pretoken left, we can stop merging
+                break
+        return pretoken
+
+    def encode_segment(self, segment: bytes) -> List[int]:
+        """
+        Encode a segment of bytes using simple algorithm that follows the order of merges
+        
+        Parameters
+        ----------
+        segment : bytes
+            The input segment to be encoded.
+
+        Returns
+        -------
+        list[int]
+            A list of token IDs representing the encoded segment.
+        """
+        
+        # Initialize an empty list to store the encoded result
+        encoded_result = []
+        
+        # Split the segment into pretokens using the GPT2-style regex pattern
+        pretokens = self.split_byte_patterns.finditer(segment)
+        
+        # Iterate through each pretoken
+        for pretoken in pretokens:
+            # Check if the pretoken is empty
+            if pretoken == b"":
+                continue
+            
+            # Check if the pretoken is in the vocabulary
+            if pretoken in self.vocab_reverse:
+                # Append the token ID to the encoded result
+                encoded_result.append(self.vocab_reverse[pretoken])
+            else:
+                # If the pretoken is not in the vocabulary, we split into bytes
+                # and merge the byte pairs
+                # Convert the pretoken to a list of bytes
+                pretoken_bytes = [bytes([i]) for i in pretoken.group(0)]
+                # Merge the byte pairs in the pretoken
+                merged_pretoken = self.merge_byte_pairs(pretoken_bytes)
+                merged_token_ids = []
+                for i in range(len(merged_pretoken)):
+                    # Check if the merged pretoken is in the vocabulary
+                    if merged_pretoken[i] in self.vocab_reverse:
+                        # Append the token ID to the encoded result
+                        merged_token_ids.append(self.vocab_reverse[merged_pretoken[i]])
+                    else:
+                        # If the merged pretoken is not in the vocabulary, we skip it
+                        self.logger._logger.warning("Un-tokenizable sequence found: {}".format(merged_pretoken[i]))
+                encoded_result.extend(merged_token_ids)
+                
+                # # Check if the merged pretoken is in the vocabulary
+                # if merged_pretoken in self.vocab_reverse:
+                #     # Append the token ID to the encoded result
+                #     encoded_result.append(self.vocab_reverse[merged_pretoken])
+                # else:
+                #     self.logger._logger.warning("Un-tokenizable sequence found: {}".format(pretoken))
+        
+        return encoded_result
+
+
+
+    def encode(self, text: str, **kwargs) -> List[int]:
         """
         Encode the input text using the BPE tokenizer.
         
@@ -513,9 +664,118 @@ class BPE_Tokenizer:
         list[int]
             A list of token IDs representing the encoded text.
         """
-        return NotImplementedError("Encoding is not implemented yet.")
         
+        self.logger._logger.info("--- Step 0: Encoding the text ---")
+        self.logger._logger.debug("Text: {}".format(text))
+        # Convert the text to bytes
+        byte_text = text.encode("utf-8")
+        
+        self.logger._logger.info("--- Step 1: Splitting text into pretokens ---")
+        # Split the text into pretokens using the GPT2-style regex pattern
+        segments = split_chunk(
+            chunk=byte_text,
+            special_split_tokens=self.encoded_special_tokens,
+            logger=self.logger._logger
+        )
+        
+        self.logger._logger.debug("Segments: {}".format(segments))
+        
+        # Encode the pretokens using the vocabulary
+        self.logger._logger.info("--- Step 2: Encoding the pretokens ---")
+        
+        encoded_result = []
+        for segment in segments:
+            # Check if the segment is a token in the vocabulary
+            if segment is None or len(segment) == 0:
+                # Skip empty segments
+                self.logger._logger.debug("Skipping empty segment.")
+                continue
+            # Check if the segment is in the vocabulary
+            # which means it is either a single word or a special token
+            if segment in self.vocab_reverse:
+                # If yes, we just need to get the token ID using the reverse text-to-ID vocabulary
+                encoded_result.append(self.vocab_reverse[segment])
+            else:
+                # If no, we need to encode the segment using the BPE algorithm
+                # We can use the Trie longest match algorithm
+                # to encode the segment
+                # Or we can use the simple algorithm that follows the order of merges
+                # Trie is faster but it yields different results which we dont know is better
+                # So for now we will use the simple algorithm
+                encoded_result.extend(self.encode_segment(segment))
+
+        self.logger._logger.debug("Encoded result: {}".format(encoded_result))      
+        self.logger._logger.info("--- Encoding completed ---")  
+        return encoded_result
+        
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        """
+        Given an iterable of strings (e.g., a Python file handle), return a generator that
+        lazily yields token IDs. This is required for memory-efficient tokenization of large
+        files that we cannot directly load into memory.
+        
+        Parameters
+        ----------
+        iterable : Iterable[str]
+            An iterable of strings to be encoded.
+
+        Returns
+        -------
+        Iterator[int]
+            An iterator that yields token IDs representing the encoded strings.
+        """
+
+        for text_chunk in iterable:
+            # Encode the text chunk
+            encoded_chunk = self.encode(text_chunk)
+            # Yield each token ID in the encoded chunk
+            self.logger._logger.debug("Yielding token IDs for chunk: {}".format(text_chunk))
+            for token_ids in encoded_chunk:
+                yield token_ids
     
+    def decode(self, token_ids: List[int]) -> str:
+        """
+        Decode a list of token IDs back into the original text.
+        
+        Parameters
+        ----------
+        token_ids : List[int]
+            The list of token IDs to be decoded.
+
+        Returns
+        -------
+        str
+            The decoded text.
+        """
+        
+        # Initialize an empty bytearray to store the decoded bytes
+        all_decoded_bytes = bytearray() 
+        self.logger._logger.debug("Decoding token IDs: {}".format(token_ids))
+        
+        # Iterate through the token IDs and decode them
+        for token_id in token_ids:
+            # Check if the token ID is in the vocabulary
+            # If it is, append the corresponding bytes to the decoded bytes
+            if token_id in self.vocab:
+                all_decoded_bytes.extend(self.vocab[token_id]) 
+            else:
+                # If the token ID is not in the vocabulary, we skip it
+                self.logger._logger.warning(f"Un-decodable token ID found: {token_id}")
+                # We append a replacement character (U+FFFD) to indicate an error
+                all_decoded_bytes.extend(b"\xef\xbf\xbd") # UTF-8 bytes for U+FFFD
+        
+        # Decode the bytearray to a string
+        result = ''
+        try:
+            result = all_decoded_bytes.decode("utf-8")
+            
+        except UnicodeDecodeError as e:
+            self.logger._logger.warning(f"Malformed final byte sequence after token reconstruction: {e}. Attempting replacement decode.")
+            result = all_decoded_bytes.decode("utf-8", errors="replace") # This is the fallback
+        self.logger._logger.debug("Decoded result: '{}'".format(result))
+        return result
+
+
 if __name__ == "__main__":
     # wandb.init(
     #     project="bpe-tokenizer",
@@ -527,19 +787,26 @@ if __name__ == "__main__":
         
     # )
     kwargs = {
-        "wandb": True,
+        # "wandb": False,
     }
-    wandb.login(
-        host="http://wandb-local:8080",
-        key="local-457a9e8c8b72f707c6097ca5ed30cf734f3af223"
-    )
+    if kwargs.get("wandb") is not None:
+        wandb.login(
+            host="http://wandb-local:8080",
+            key="local-457a9e8c8b72f707c6097ca5ed30cf734f3af223"
+        )
     
-    bpe_tokenizer = BPE_Tokenizer(verbose=20)
-    bpe_tokenizer.prepare_training_data(
-        input_path="data/TinyStoriesV2-GPT4-valid.txt",
-        vocab_size=1000,
-        special_tokens=["<|endoftext|>"],
-        **kwargs
-    )
+    bpe_tokenizer = BPE_Tokenizer(verbose=10)
+    # bpe_tokenizer.prepare_training_data(
+    #     input_path="data/TinyStoriesV2-GPT4-valid.txt",
+    #     vocab_size=1000,
+    #     special_tokens=["<|endoftext|>"],
+    #     **kwargs
+    # )
 
-    bpe_tokenizer.train(parallel=False, measurement=False)
+    # bpe_tokenizer.train(parallel=False, measurement=False)
+    bpe_tokenizer.from_files(
+        vocab_path="data/owt_10k_vocab.pkl",
+        merges_path="data/owt_10k_merges.pkl",
+        special_tokens=["<|endoftext|>"]
+    )
+    bpe_tokenizer.encode("Hello, world!<|endoftext|>I don't know what I am.<|endoftext|>I just am.")

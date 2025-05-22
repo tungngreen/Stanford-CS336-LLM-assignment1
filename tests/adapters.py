@@ -565,9 +565,10 @@ def get_tokenizer(
     tokenizer = BPE_Tokenizer(
         vocab=vocab,
         merges=merges,
-        special_tokens=special_tokens
+        special_tokens=special_tokens,
+        verbose=10
     )
-    raise tokenizer
+    return tokenizer
 
 
 def run_train_bpe(

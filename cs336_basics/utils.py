@@ -7,13 +7,14 @@ import pickle
 import numpy as np
 
 import multiprocessing as mp
+from logging import Logger
 
 def save_with_pickle(
     vocab_filepath: str,
     merges_filepath: str,
     vocab: dict[int, bytes],
     merges: List[tuple[bytes, bytes]],
-    logger=None):
+    logger: Logger = None):
     """Saves vocab and merges using pickle."""
     try:
         # Save vocabulary
@@ -39,7 +40,7 @@ def save_with_pickle(
 def load_with_pickle(
     vocab_filepath: str,
     merges_filepath: str,
-    logger=None
+    logger: Logger = None
 ) -> tuple[dict[int, bytes], List[tuple[bytes, bytes]]]:
     """Loads vocab and merges using pickle."""
     vocab = None
@@ -74,7 +75,7 @@ def load_with_pickle(
 
 
 def get_pair_stats(
-    pretoken_freq: Dict[bytes, Tuple[List[bytes], int]], logger=None
+    pretoken_freq: Dict[bytes, Tuple[List[bytes], int]], logger: Logger = None
 ) -> Counter[Tuple[bytes, bytes]]:
     """
     Computes the frequency of pairs of pretoken sequences.
@@ -125,7 +126,7 @@ def find_chunk_boundaries(
     byte_text_file: bytes = b"",
     num_desired_chunks: int = 1,
     special_split_tokens: Union[bytes, List[bytes]] = b" ",
-    logger=None
+    logger: Logger = None
 ):
     """
     Finds byte offsets in a binary file to serve as chunk boundaries.
@@ -293,7 +294,7 @@ def process_chunk(
     chunk: bytes,
     split_patterns: str,
     special_split_tokens: Union[bytes, List[bytes]] = b" ",
-    logger=None
+    logger: Logger = None
 ) -> Counter[bytes]:
     """
     Worker function for multiprocessing during pretokenization.
@@ -387,7 +388,7 @@ def merge_byte_pairs(
     pretoken_freq: Dict[bytes, Tuple[List[bytes], int]],
     byte_pairs_freq: Counter[Tuple[bytes, bytes]],
     best_pair: Tuple[bytes, bytes],
-    logger=None
+    logger: Logger = None
 ):
     """
     Performs a single BPE merge operation on the pretoken frequency dictionary.
@@ -505,6 +506,70 @@ def merge_byte_pairs(
     return num_byte_tokens_total
                                         
 
+def split_chunk(
+    chunk: bytes,
+    special_split_tokens: Union[bytes, List[bytes]] = b" ",
+    logger: Logger = None,
+) -> List[str]:
+    """
+    Splits a chunk of text into segments based on special tokens.
+    Parameters
+    ----------
+    chunk : bytes
+        The chunk of text to be processed.
+    split_byte_patterns : re.Pattern[bytes]
+        The regex pattern used for splitting the chunk into pretokens.
+        This pattern is typically used to identify words, numbers, punctuation, and whitespace.
+    special_split_tokens : bytes | List[bytes]
+        The byte sequence(s) to use as delimiters for splitting the chunk.
+        If a list is provided, the function will split on any of the tokens in the list.
+        If a single bytes object is provided, it will be used as the delimiter.
+    Returns
+    -------
+    List[bytes]
+        A list of byte pretokens extracted from the chunk.
+        For instance, the chunk 'the cat ate' might be split into:
+        [b'the', b'cat', b'ate'].
+
+    """
+    
+    # --- Input Validation ---
+    # Ensure the chunk is not empty
+    if not chunk:
+        if logger:
+            logger.warning("Chunk is empty. Cannot process an empty chunk.")
+    # Ensure the split_patterns is a valid regex pattern
+
+    # Ensure the special_split_token is a correct format
+    if not isinstance(special_split_tokens, (bytes, list)):
+        raise ValueError("special_split_token must be a bytes or a list of bytes.")
+    if isinstance(special_split_tokens, list):
+        if not all(isinstance(token, bytes) for token in special_split_tokens):
+            raise ValueError("If special_split_token is a list, all elements must be bytes")
+        if not special_split_tokens:
+            # Handle empty list case
+            logger.warning("special_split_token list is empty. Cannot find delimiters.")
+        # If it's a list, keep it as the list for pattern compilation
+        # Sort the special_split_tokens by length in descending order to ensure longer tokens are matched first
+        # avoiding issues in cases like "<|endoftext|>" and "<|endoftext|><|endoftext|>"
+        special_split_tokens = sorted(special_split_tokens, key=len, reverse=True)
+    else:
+        # If it's a single bytes object, wrap it in a list for pattern compilation
+        special_split_tokens = [special_split_tokens]
+
+    # Compile the regex pattern to efficiently search for ANY of the specified tokens.
+    compiled_split_tokens = re.compile(b"|".join(b"(" + re.escape(token) + b")" for token in special_split_tokens))
+    
+    # Initialize a list to store the segments
+    segments: List[bytes] = []
+    # If the split token is provided, split the chunk into segments
+    if special_split_tokens:
+        segments = compiled_split_tokens.split(chunk)
+    # If no split token is provided, treat the entire chunk as a single segment
+    else:
+        segments = [chunk]
+    
+    return segments
 
     
 if __name__ == "__main__":
