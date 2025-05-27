@@ -3,7 +3,7 @@ import numpy
 import torch
 import torch.nn.functional as F
 
-from .adapters import (
+from adapters import (
     run_multihead_self_attention_with_rope,
     run_rope,
     run_silu,
@@ -185,6 +185,21 @@ def test_transformer_lm_truncated_input(
     )
 
 
+def save_3d_tensor_to_txt(tensor, filename):
+    """Saves a 3D NumPy tensor to a text file.
+
+    Args:
+        tensor (np.ndarray): The 3D tensor to save.
+        filename (str): The path to the output file.
+    """
+    tensor = tensor.detach().cpu().numpy() if isinstance(tensor, torch.Tensor) else tensor
+    with open(filename, 'w') as f:
+        for i in range(tensor.shape[0]):
+            f.write(f"Slice {i}:\n")
+            numpy.savetxt(f, tensor[i, :, :], fmt='%.6f')
+            f.write("\n")
+
+
 def test_transformer_block(numpy_snapshot, ts_state_dict, in_embeddings, d_model, n_heads, d_ff, n_keys, theta):
     # reference_weights = torch.load(FIXTURES_PATH / "transformer_block_weights.pt")
     # in_features = torch.load(FIXTURES_PATH / "in_features.pt")
@@ -200,6 +215,7 @@ def test_transformer_block(numpy_snapshot, ts_state_dict, in_embeddings, d_model
         weights=block_weights,
         in_features=in_embeddings,
     )
+
     numpy_snapshot.assert_match(
         actual_output,
         atol=1e-6,
@@ -239,3 +255,42 @@ def test_silu_matches_pytorch():
     expected_output = F.silu(x)
     actual_output = run_silu(x)
     numpy.testing.assert_allclose(actual_output.detach().numpy(), expected_output.detach().numpy(), atol=1e-6)
+
+if __name__ == "__main__":
+    import pytest
+    
+    # Run all tests
+    pytest.main([__file__, "-s"])
+    
+    # # Run test_linear()
+    # pytest.main([__file__, "-k", "test_linear", "-s"])
+    
+    # # Run test_embedding()
+    # pytest.main([__file__, "-k", "test_embedding", "-s"])
+    
+    # # Run test_rmsnorm()
+    # pytest.main([__file__, "-k", "test_rmsnorm", "-s"])
+    
+    # # Run test_swiglu()
+    # pytest.main([__file__, "-k", "test_swiglu", "-s"])
+    
+    # # Run test_rope()
+    # pytest.main([__file__, "-k", "test_rope", "-s"])
+    
+    # # Run test_scaled_dot_product_attention()
+    # pytest.main([__file__, "-k", "test_scaled_dot_product_attention", "-s"])
+    
+    # # Run test_4d_scaled_dot_product_attention()
+    # pytest.main([__file__, "-k", "test_4d_scaled_dot_product_attention", "-s"])
+    
+    # # Run test_multihead_self_attention()
+    # pytest.main([__file__, __file__ + "::test_multihead_self_attention", "-s"])
+    
+    # # Run test_multihead_self_attention_with_rope()
+    # pytest.main([__file__, __file__ + "::test_multihead_self_attention_with_rope", "-s"])
+    
+    # # Run test_transformer_block()
+    # pytest.main([__file__, "-k", "test_transformer_block", "-s"])
+    
+    # Run test_transformer_lm()
+    # pytest.main([__file__, __file__ + "::test_transformer_lm", "-s"])

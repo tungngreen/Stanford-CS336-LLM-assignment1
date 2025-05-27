@@ -1,5 +1,5 @@
-from cs336_basics.bpe import BPE_Tokenizer
-from cs336_basics.utils import save_with_pickle
+from cs336_basics.tokenizer.bpe import BPE_Tokenizer
+from cs336_basics.tokenizer import save_with_pickle
 import wandb
 """
     Train a BPE tokenizer on the TinyStories dataset.

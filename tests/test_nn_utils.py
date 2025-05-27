@@ -2,7 +2,7 @@ import numpy
 import torch
 import torch.nn.functional as F
 
-from .adapters import run_cross_entropy, run_gradient_clipping, run_softmax
+from adapters import run_cross_entropy, run_gradient_clipping, run_softmax
 
 
 def test_softmax_matches_pytorch():
@@ -86,3 +86,10 @@ def test_gradient_clipping():
             t1_c_grad.detach().numpy(),
             atol=1e-6,
         )
+
+
+if __name__ == "__main__":
+    import pytest
+    # Run test_softmax_matches_pytorch with -k which allows filtering by test name
+    # And -s to show print statements
+    pytest.main([__file__, "-k", "test_softmax_matches_pytorch", "-s"])

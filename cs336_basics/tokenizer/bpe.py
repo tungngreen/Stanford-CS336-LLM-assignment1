@@ -11,9 +11,9 @@ import logging
 import multiprocessing as mp
 import subprocess
 
-from cs336_basics.utils import find_chunk_boundaries, process_chunk,get_pair_stats, \
+from cs336_basics.tokenizer.utils import find_chunk_boundaries, process_chunk,get_pair_stats, \
                                merge_byte_pairs, load_with_pickle, split_chunk
-from cs336_basics.trie import BPETrie           
+from cs336_basics.tokenizer.trie import BPETrie           
 
 import cProfile
 from tqdm import tqdm
@@ -435,7 +435,7 @@ class BPE_Tokenizer(Tokenizer):
             A list of special tokens
         """
         if logger is None:
-            from cs336_basics.logger import Logger
+            from cs336_basics.common import Logger
             
             self.logger = Logger(
                 name="Tokenizer",
