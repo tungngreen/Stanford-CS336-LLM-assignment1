@@ -1,5 +1,5 @@
 import os
-from cs336_basics.bpe import BPE_Tokenizer
+from cs336_basics.tokenizer.bpe import BPE_Tokenizer
 
 input_file = "data/owt_train.txt"
 output_dir = "data/tokenized"

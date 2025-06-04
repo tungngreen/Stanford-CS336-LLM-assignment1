@@ -202,16 +202,20 @@ class Transformer(nn.Module):
             dtype=dtype
         )
         
-    def forward(self, in_features: Float[torch.Tensor, 'batch_size seq_len d_model'], token_positions: Int[torch.Tensor, 'batch_size seq_len'] = None) -> Float[torch.Tensor, 'batch_size seq_len d_model']:
+    def forward(
+        self,
+        in_features: Float[torch.Tensor, 'batch_size seq_len'],
+        token_positions: Int[torch.Tensor, '... seq_len'] = None
+    ) -> Float[torch.Tensor, 'batch_size seq_len d_model']:
         
         """
         Forward pass of the Transformer model.
         
         Parameters
         ----------
-        in_features : Float[torch.Tensor, 'batch_size seq_len d_model']
-            Input tensor of shape (batch_size, seq_len, d_model).
-        token_positions : Int[torch.Tensor, 'batch_size seq_len'], optional
+        in_features : Float[torch.Tensor, 'batch_size seq_len']
+            Input tensor of shape (batch_size, seq_len) containing several batches, each with a sequence of token IDs.
+        token_positions : Int[torch.Tensor, '... seq_len'], optional
             Token positions for rotary positional embedding, by default None.
         
         Returns

@@ -1,7 +1,7 @@
 import numpy
 import torch
 
-from .adapters import get_adamw_cls, run_get_lr_cosine_schedule
+from adapters import get_adamw_cls, run_get_lr_cosine_schedule
 
 
 def _optimize(opt_class) -> torch.Tensor:
@@ -94,3 +94,15 @@ def test_get_lr_cosine_schedule():
         for it in range(25)
     ]
     numpy.testing.assert_allclose(numpy.array(actual_lrs), numpy.array(expected_lrs))
+    
+if __name__ == '__main__':
+    import pytest
+    
+    # # Run test_adamw
+    # pytest.main([__file__, '-k', 'test_adamw', '-s'])
+    
+    # # Run test_get_lr_cosine_schedule
+    # pytest.main([__file__, '-k', 'test_get_lr_cosine_schedule', '-s'])
+
+    # Run all tests
+    pytest.main([__file__, '-s'])

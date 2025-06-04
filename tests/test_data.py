@@ -4,7 +4,7 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from .adapters import run_get_batch
+from adapters import run_get_batch
 
 
 def test_get_batch():
@@ -70,3 +70,6 @@ def test_get_batch():
             device="cuda:99",
         )
         assert "CUDA error" in str(excinfo.value) or "Torch not compiled with CUDA enabled" in str(excinfo.value)
+
+if __name__ == "__main__":
+    pytest.main([__file__])

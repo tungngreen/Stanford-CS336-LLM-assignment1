@@ -92,4 +92,10 @@ if __name__ == "__main__":
     import pytest
     # Run test_softmax_matches_pytorch with -k which allows filtering by test name
     # And -s to show print statements
-    pytest.main([__file__, "-k", "test_softmax_matches_pytorch", "-s"])
+    # pytest.main([__file__, "-k", "test_softmax_matches_pytorch", "-s"])
+    
+    # # Run test_cross_entropy
+    # pytest.main([__file__, "-k", "test_cross_entropy", "-s"])
+    
+    # Run test_gradient_clipping
+    pytest.main([__file__, "-k", "test_gradient_clipping", "-s"])
