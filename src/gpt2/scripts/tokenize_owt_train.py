@@ -1,7 +1,7 @@
 import os
-from cs336_basics.tokenizer.bpe import BPE_Tokenizer
+from gpt2.tokenizer.bpe import BPE_Tokenizer
 
-input_file = "data/owt_valid.txt"
+input_file = "data/owt_train.txt"
 output_dir = "data/tokenized"
 tokenizer = BPE_Tokenizer(
     vocab="data/tokenizer/owt_vocab.pkl",

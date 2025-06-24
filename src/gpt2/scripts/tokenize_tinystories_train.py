@@ -1,5 +1,5 @@
 import os
-from cs336_basics.tokenizer.bpe import BPE_Tokenizer
+from gpt2.tokenizer.bpe import BPE_Tokenizer
 
 input_file = "data/TinyStoriesV2-GPT4-train.txt"
 output_dir = "data/tokenized"

@@ -11,9 +11,9 @@ import logging
 import multiprocessing as mp
 import subprocess
 
-from cs336_basics.tokenizer.utils import find_chunk_boundaries, process_chunk,get_pair_stats, \
+from gpt2.tokenizer.utils import find_chunk_boundaries, process_chunk,get_pair_stats, \
                                merge_byte_pairs, load_with_pickle, split_chunk
-from cs336_basics.tokenizer.trie import BPETrie           
+from gpt2.tokenizer.trie import BPETrie
 
 import cProfile
 from tqdm import tqdm
@@ -416,8 +416,8 @@ class BPE_Tokenizer(Tokenizer):
     
     def __init__(
         self,
-        vocab: dict[int, bytes] | str,
-        merges: list[tuple[bytes, bytes]] | str,
+        vocab: dict[int, bytes] | str = {},
+        merges: list[tuple[bytes, bytes]] | str = [],
         special_tokens: list[str] | None = None,
         logger = None,
         verbose: bool = 10, # DEBUG level
@@ -435,7 +435,7 @@ class BPE_Tokenizer(Tokenizer):
             A list of special tokens
         """
         if logger is None:
-            from cs336_basics.common import Logger
+            from gpt2.common import Logger
             
             self.logger = Logger(
                 name="Tokenizer",
@@ -670,6 +670,10 @@ class BPE_Tokenizer(Tokenizer):
             special_split_tokens=self.encoded_special_tokens,
             logger=self.logger
         )
+        if chunk_boundaries[0] != 0:
+            # If the first chunk boundary is not at the beginning of the file,
+            # we need to add a chunk boundary at the beginning of the file
+            chunk_boundaries.insert(0, 0)
         end_step = time.time()
         
         self.logger.debug("Chunk boundaries found in {} seconds.".format(end_step - start_step))

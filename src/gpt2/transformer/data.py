@@ -155,7 +155,7 @@ if __name__ == "__main__":
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
     
-    from cs336_basics.tokenizer.bpe import BPE_Tokenizer
+    from gpt2.tokenizer.bpe import BPE_Tokenizer
     tokenizer = BPE_Tokenizer(verbose=40)
     tokenizer.from_files(
         vocab_path="data/tokenizer/TinyStoriesV2-GPT4-vocab.pkl",

@@ -7,19 +7,20 @@ from jaxtyping import Float, Int
 import multiprocessing as mp
 import regex as re
 
+from typing import Type
 import numpy.typing as npt
 import torch
 from torch import Tensor
 
-from cs336_basics.tokenizer.bpe import BPE_Tokenizer
-from cs336_basics.transformer.linear import Linear
-from cs336_basics.transformer.embedding import Embedding, RotaryPositionalEmbedding
-from cs336_basics.transformer.normalization import RMSNorm
-from cs336_basics.transformer.activation import SwigLU, SiLU
-from cs336_basics.transformer.attention import softmax, scaled_dot_product_attention, MultiheadSelfAttention
-from cs336_basics.transformer.model import TransformerBlock, Transformer
-from cs336_basics.transformer.loss import cross_entropy
-from cs336_basics.transformer.optimizers import AdamW, learning_rate_scheduler, gradient_clipping
+from gpt2.tokenizer.bpe import BPE_Tokenizer
+from gpt2.transformer.linear import Linear
+from gpt2.transformer.embedding import Embedding, RotaryPositionalEmbedding
+from gpt2.transformer.normalization import RMSNorm
+from gpt2.transformer.activation import SwigLU, SiLU
+from gpt2.transformer.attention import softmax, scaled_dot_product_attention, MultiheadSelfAttention
+from gpt2.transformer.model import TransformerBlock, Transformer
+from gpt2.transformer.loss import cross_entropy
+from gpt2.transformer.optimizers import AdamW, learning_rate_scheduler, gradient_clipping
 import wandb
 
 def run_linear(
@@ -600,7 +601,7 @@ def run_get_batch(
         language modeling labels.
     """
     
-    from cs336_basics.transformer.data import data_loading
+    from gpt2.transformer.data import data_loading
     return data_loading(dataset, batch_size, context_length, device)
 
 
@@ -716,7 +717,7 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    from cs336_basics.transformer.utils import save_checkpoint
+    from gpt2.transformer.utils import save_checkpoint
     return save_checkpoint(
         model=model,
         optimizer=optimizer,
@@ -743,7 +744,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    from cs336_basics.transformer.utils import load_checkpoint
+    from gpt2.transformer.utils import load_checkpoint
     return load_checkpoint(
         src=src,
         model=model,
@@ -776,7 +777,7 @@ def get_tokenizer(
         vocab=vocab,
         merges=merges,
         special_tokens=special_tokens,
-        verbose=10
+        verbose=50
     )
     return tokenizer
 
@@ -816,7 +817,8 @@ def run_train_bpe(
             key="local-457a9e8c8b72f707c6097ca5ed30cf734f3af223"
         )
 
-    bpe_tokenizer = BPE_Tokenizer(verbose=20, **kwargs)
+    bpe_tokenizer = BPE_Tokenizer(
+        verbose=20, **kwargs)
     bpe_tokenizer.prepare_training_data(
         input_path=input_path,
         vocab_size=vocab_size,
@@ -828,6 +830,141 @@ def run_train_bpe(
 
     return bpe_tokenizer.vocab, bpe_tokenizer.merges
 
+
+#################################################################### System Tests ####################################################################
+def get_flashattention_autograd_function_pytorch() -> Type:
+    """
+    Returns a torch.autograd.Function subclass that implements RMSNorm.
+    The expectation is that this class will implement RMSNorm
+    using standard PyTorch operations.
+
+    Returns:
+        A class object (not an instance of the class)
+    """
+    # For example: return MyRMSNormAutogradFunctionClass
+    raise NotImplementedError
+
+
+def get_flashattention_autograd_function_triton() -> Type:
+    """
+    Returns a torch.autograd.Function subclass that implements RMSNorm
+    using Triton kernels.
+    The expectation is that this class will implement the same operations
+    as the class you return in get_rmsnorm_autograd_function_pytorch(),
+    but it should do so by invoking custom Triton kernels in the forward
+    and backward passes.
+
+    Returns:
+        A class object (not an instance of the class)
+    """
+    # For example: return MyTritonRMSNormAutogradFunctionClass
+    raise NotImplementedError
+
+
+def get_ddp_individual_parameters(module: torch.nn.Module) -> torch.nn.Module:
+    """
+    Returns a torch.nn.Module container that handles
+    parameter broadcasting and gradient synchronization for
+    distributed data parallel training.
+
+    This container should overlaps communication with backprop computation
+    by asynchronously communicating gradients as they are ready
+    in the backward pass. The gradient for each parameter tensor
+    is individually communicated.
+
+    Args:
+        module: torch.nn.Module
+            Underlying model to wrap with DDP.
+    Returns:
+        Instance of a DDP class.
+    """
+    # For example: return DDPIndividualParameters(module)
+    raise NotImplementedError
+
+
+def ddp_individual_parameters_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
+    """
+    Code to run after the backward pass is completed, but before we take
+    an optimizer step.
+
+    Args:
+        ddp_model: torch.nn.Module
+            DDP-wrapped model.
+        optimizer: torch.optim.Optimizer
+            Optimizer being used with the DDP-wrapped model.
+    """
+    # For example: ddp_model.finish_gradient_synchronization()
+    raise NotImplementedError
+
+
+def get_ddp_bucketed(module: torch.nn.Module, bucket_size_mb: float) -> torch.nn.Module:
+    """
+    Returns a torch.nn.Module container that handles
+    parameter broadcasting and gradient synchronization for
+    distributed data parallel training.
+
+    This container should overlaps communication with backprop computation
+    by asynchronously communicating buckets of gradients as they are ready
+    in the backward pass.
+
+    Args:
+        module: torch.nn.Module
+            Underlying model to wrap with DDP.
+        bucket_size_mb: The bucket size, in megabytes. If None, use a single
+            bucket of unbounded size.
+    Returns:
+        Instance of a DDP class.
+    """
+    raise NotImplementedError
+
+
+def ddp_bucketed_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
+    """
+    Code to run after the backward pass is completed, but before we take
+    an optimizer step.
+
+    Args:
+        ddp_model: torch.nn.Module
+            DDP-wrapped model.
+        optimizer: torch.optim.Optimizer
+            Optimizer being used with the DDP-wrapped model.
+    """
+    # For example: ddp_model.finish_gradient_synchronization()
+    raise NotImplementedError
+
+
+def ddp_bucketed_on_train_batch_start(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
+    """
+    Code to run at the very start of the training step.
+
+    Args:
+        ddp_model: torch.nn.Module
+            DDP-wrapped model.
+        optimizer: torch.optim.Optimizer
+            Optimizer being used with the DDP-wrapped model.
+    """
+    raise NotImplementedError
+
+
+def get_sharded_optimizer(params, optimizer_cls: Type[torch.optim.Optimizer], **kwargs) -> torch.optim.Optimizer:
+    """
+    Returns a torch.optim.Optimizer that handles optimizer state sharding
+    of the given optimizer_cls on the provided parameters.
+
+    Arguments:
+        params (``Iterable``): an ``Iterable`` of :class:`torch.Tensor` s
+            or :class:`dict` s giving all parameters, which will be sharded
+            across ranks.
+        optimizer_class (:class:`torch.nn.Optimizer`): the class of the local
+            optimizer.
+    Keyword arguments:
+        kwargs: keyword arguments to be forwarded to the optimizer constructor.
+    Returns:
+        Instance of sharded optimizer.
+    """
+    raise NotImplementedError
+
+######################################################################################################################################
 
 
 if __name__ == "__main__":

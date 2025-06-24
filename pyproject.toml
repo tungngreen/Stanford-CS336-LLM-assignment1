@@ -1,10 +1,11 @@
 [project]
-name = "cs336_basics"
+name = "gpt2"
 version = "1.0.3"
-description = "CS336 Assignment 1"
+description = "gpt2 model from scratch"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "humanfriendly",
     "einops>=0.8.1", # tensor operations
     "einx>=0.3.0", # more general tensor operations
     "jaxtyping>=0.3.0", # type hints for pytorch/jax/numpy
@@ -27,7 +28,7 @@ dependencies = [
 
 
 [tool.setuptools.packages.find]
-include = ["cs336_basics"]
+where=["src"]
 
 
 [tool.uv]

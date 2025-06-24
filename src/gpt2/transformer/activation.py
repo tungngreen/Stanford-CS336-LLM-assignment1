@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 from jaxtyping import Float
 
-from cs336_basics.transformer.linear import Linear
+from gpt2.transformer.linear import Linear
 import math
 
 class SiLU(torch.nn.Module):

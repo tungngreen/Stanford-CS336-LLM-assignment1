@@ -1,7 +1,7 @@
 import torch
 import wandb
-from cs336_basics.transformer.trainer import TransformerTrainer
-from cs336_basics.tokenizer.bpe import BPE_Tokenizer
+from gpt2.transformer.trainer import TransformerTrainer
+from gpt2.tokenizer.bpe import BPE_Tokenizer
 
 
 wandb.login(
@@ -29,19 +29,19 @@ kwargs = {
 # Example usage
 trainer = TransformerTrainer(
     vocab_size=BPE_tokenizer.vocab_size,
-    context_length=512,
+    context_length=256,
     d_model=512,
     num_layers=6,
     num_heads=16,
     d_ff=1344,
     rope=None, # Rope will be initialized later if needed
-    device=torch.device("cuda:3" if torch.cuda.is_available() else "cpu"),
+    device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
     dtype=torch.float32,
     # Data
     dataset="tinystories",
     data_path=data_path,
     # Optimizer training hyperparameters
-    batch_size=32,
+    batch_size=64,
     optimizer="adamw",
     lr=0.001,
     betas=(0.9, 0.999),

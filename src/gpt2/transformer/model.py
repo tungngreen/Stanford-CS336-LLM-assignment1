@@ -6,12 +6,12 @@ import torch
 from torch import nn
 from jaxtyping import Float, Int
 from typing import Optional
-from cs336_basics.transformer.linear import Linear
-from cs336_basics.transformer.activation import SiLU, SwigLU
-from cs336_basics.transformer.normalization import RMSNorm
-from cs336_basics.transformer.attention import MultiheadSelfAttention, softmax
-from cs336_basics.transformer.embedding import RotaryPositionalEmbedding, Embedding
-from cs336_basics.tokenizer.bpe import BPE_Tokenizer
+from gpt2.transformer.linear import Linear
+from gpt2.transformer.activation import SiLU, SwigLU
+from gpt2.transformer.normalization import RMSNorm
+from gpt2.transformer.attention import MultiheadSelfAttention, softmax
+from gpt2.transformer.embedding import RotaryPositionalEmbedding, Embedding
+from gpt2.tokenizer.bpe import BPE_Tokenizer
 
 class TransformerBlock(nn.Module):
     """

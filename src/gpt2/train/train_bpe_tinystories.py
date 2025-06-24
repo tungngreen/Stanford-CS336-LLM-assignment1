@@ -1,5 +1,5 @@
-from cs336_basics.tokenizer.bpe import BPE_Tokenizer
-from cs336_basics.tokenizer.utils import save_with_pickle
+from gpt2.tokenizer.bpe import BPE_Tokenizer
+from gpt2.tokenizer.utils import save_with_pickle
 import json
 import pickle
 

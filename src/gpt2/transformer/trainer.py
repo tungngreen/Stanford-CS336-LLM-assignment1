@@ -8,14 +8,14 @@ from tqdm import tqdm
 from einops import rearrange
 import time
 
-from cs336_basics.transformer.model import Transformer
-from cs336_basics.transformer.data import TokenizedDataset
-from cs336_basics.transformer.utils import save_checkpoint, load_checkpoint
-from cs336_basics.transformer.embedding import RotaryPositionalEmbedding
-from cs336_basics.transformer.optimizers import AdamW, learning_rate_scheduler, gradient_clipping
-from cs336_basics.transformer.loss import cross_entropy
-from cs336_basics.common import Logger
-from cs336_basics.tokenizer.bpe import BPE_Tokenizer
+from gpt2.transformer.model import Transformer
+from gpt2.transformer.data import TokenizedDataset
+from gpt2.transformer.utils import save_checkpoint, load_checkpoint
+from gpt2.transformer.embedding import RotaryPositionalEmbedding
+from gpt2.transformer.optimizers import AdamW, learning_rate_scheduler, gradient_clipping
+from gpt2.transformer.loss import cross_entropy
+from gpt2.common import Logger
+from gpt2.tokenizer.bpe import BPE_Tokenizer
 import wandb
 
 class TransformerTrainer:

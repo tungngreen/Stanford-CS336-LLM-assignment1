@@ -3,7 +3,7 @@ Analyzing the vocabulary after training a BPE tokenizer on TinyStories and OpenW
 """
 
 import pickle
-from cs336_basics.utils import load_with_pickle
+from gpt2.utils import load_with_pickle
 
 vocab_path = "data/tinystories_vocab.pkl"
 merges_path = "data/tinystories_merges.pkl"

@@ -9,8 +9,8 @@ from jaxtyping import Float, Int
 from typing import Optional
 from einops import einsum, rearrange
 
-from cs336_basics.transformer.linear import Linear
-from cs336_basics.transformer.embedding import RotaryPositionalEmbedding
+from gpt2.transformer.linear import Linear
+from gpt2.transformer.embedding import RotaryPositionalEmbedding
 
 def softmax(
     in_features: Float[torch.Tensor, '... d_model'],

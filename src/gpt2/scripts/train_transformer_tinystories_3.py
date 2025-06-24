@@ -1,7 +1,7 @@
 import torch
 import wandb
-from cs336_basics.transformer.trainer import TransformerTrainer
-from cs336_basics.tokenizer.bpe import BPE_Tokenizer
+from gpt2.transformer.trainer import TransformerTrainer
+from gpt2.tokenizer.bpe import BPE_Tokenizer
 
 
 wandb.login(
@@ -35,7 +35,7 @@ trainer = TransformerTrainer(
     num_heads=16,
     d_ff=1344,
     rope=None, # Rope will be initialized later if needed
-    device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+    device=torch.device("cuda:2" if torch.cuda.is_available() else "cpu"),
     dtype=torch.float32,
     # Data
     dataset="tinystories",
@@ -49,9 +49,9 @@ trainer = TransformerTrainer(
     eps=1e-8,
     # Learning rate scheduler hyperparameters
     lr_scheduler="cosine annealing",
-    warmup_iters=1000,
-    max_lr=0.0015,
-    min_lr=0.00015,
+    warmup_iters=500,
+    max_lr=3e-3,
+    min_lr=3e-4,
     cosine_cycle_iters=18000,
     # Gradient clipping
     max_l2_norm=1.0,

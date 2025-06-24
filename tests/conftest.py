@@ -7,6 +7,12 @@ import torch
 from torch import Tensor
 import pickle
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--snapshot-exact", 
+        action="store_true",
+        help="Use exact matching standards for snapshot matching"
+    )
 
 _A = TypeVar("_A", np.ndarray, Tensor)
 
