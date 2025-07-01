@@ -3,7 +3,7 @@ name = "gpt2"
 version = "1.0.3"
 description = "gpt2 model from scratch"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = "==3.10.12"
 dependencies = [
     "humanfriendly",
     "einops>=0.8.1", # tensor operations

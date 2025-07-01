@@ -15,15 +15,15 @@ BPE_tokenizer = BPE_Tokenizer(
     special_tokens=("<|endoftext|>")
 )
 data_path = {
-    "train": "data/tokenized/TinyStoriesV2-GPT4-train_tokenized.npy",
-    "valid": "data/tokenized/TinyStoriesV2-GPT4-valid_tokenized.npy",
+    "train": "data/tokenized/test_tokenized.npy",
+    "valid": "data/tokenized/test_tokenized.npy",
 }
 # data_path = {
 #     "train": "data/tokenized/test_tokenized.npy",
 #     "valid": "data/tokenized/test_tokenized.npy"
 # }
 kwargs = {
-    "wandb": True
+    # "wandb": False
 }
 # Example usage
 trainer = TransformerTrainer(
@@ -63,4 +63,4 @@ trainer = TransformerTrainer(
     **kwargs   
 )
 
-trainer.train(num_steps=50_000, current_step=0)
+trainer.train_profiler(num_steps=20, current_step=0, enable_backward=False)

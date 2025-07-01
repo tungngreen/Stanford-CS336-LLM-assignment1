@@ -8,9 +8,10 @@ from tqdm import tqdm
 from einops import rearrange
 import time
 
+
 from gpt2.transformer.model import Transformer
 from gpt2.transformer.data import TokenizedDataset
-from gpt2.transformer.utils import save_checkpoint, load_checkpoint
+from gpt2.transformer.utils import save_checkpoint, load_checkpoint, run_step
 from gpt2.transformer.embedding import RotaryPositionalEmbedding
 from gpt2.transformer.optimizers import AdamW, learning_rate_scheduler, gradient_clipping
 from gpt2.transformer.loss import cross_entropy
@@ -129,6 +130,7 @@ class TransformerTrainer:
                 config=run_config,
             )
 
+        self.log_dir = log_dir
         self.vocab_size = vocab_size
         self.context_length = context_length
         self.d_model = d_model
@@ -247,37 +249,28 @@ class TransformerTrainer:
                 warmup_iters=self.warmup_iters,
                 cosine_cycle_iters=self.cosine_cycle_iters
             )
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr_t
             
             # Get a batch of data
             # Step is provided to ensure that we get the same batch across multiple training runs.
             # This is useful for debugging and reproducibility.
             input_batched_seqs, output_batched_seqs = self.train_dataset(step=step)
             
-            # Forward pass
-            logits = self.model(
-                in_features=input_batched_seqs,
-                token_positions=token_positions
+            kwargs = {
+                "learning_rate": lr_t,
+                "token_positions": token_positions,
+                "max_l2_norm": self.max_l2_norm
+            }
+            
+            loss = run_step(
+                model=self.model,
+                inputs=input_batched_seqs,
+                outputs=output_batched_seqs,
+                optimizer=self.optimizer,
+                enable_backward=True,
+                **kwargs
             )
             
-            # Compute loss
-            logits_2d = rearrange(logits, 'b s v -> (b s) v')
-            output_batched_seqs_1d = rearrange(output_batched_seqs, 'b s -> (b s)')
-            loss = cross_entropy(
-                logits=logits_2d,
-                targets=output_batched_seqs_1d
-            )
-            
-            # Gradient descent step
-            self.optimizer.zero_grad()
-            loss.backward()
-            
-            gradient_clipping(
-                parameters=self.model.parameters(),
-                max_l2_norm=self.max_l2_norm
-            )
-            self.optimizer.step()
+            torch.cuda.synchronize()
             
             # Log the loss and learning rate
             self.logger.info(f"Step {step}: Loss = {loss.item():.4f}, Learning Rate = {lr_t:.6f}")
@@ -307,7 +300,11 @@ class TransformerTrainer:
                 )
                 self.logger.info(f"Checkpoint saved at step {step} to {self.checkpoint_path}.")
             
-            if self.val_dataset is not None and step % self.validation_frequency == 0:
+            # Only run validation if:
+            # 1. Validation dataset is provided
+            # 2. Step is a multiple of validation frequency
+            # 3. Profiling is not enabled (prof is None)
+            if self.val_dataset is not None and step % self.validation_frequency == 0 and prof is None:
                 # Validation step
                 self.model.eval()
                 with torch.no_grad():
@@ -349,7 +346,124 @@ class TransformerTrainer:
             
         self.logger.info(f"Training completed after {num_steps} steps.")
             
+    def train_profiler(self, num_steps: int = 100000, current_step: int = 0, with_stack=False, enable_backward=False, compiled=False):
+        """Train the transformer model with profiling for a specified number of steps.
         
+        Parameters
+        ----------
+        num_steps : int, optional
+            Number of training steps to run, by default 100000.
+        """
+        if compiled:
+            self.model = torch.compile(self.model)
+        
+        from torch.profiler import profile, record_function, ProfilerActivity
+        
+        # 10 is the number of warmup steps to stabilize the profiler
+        # We use `max_step` to initialize the dataset with enough steps
+        max_step = max(num_steps, 10)
+        
+        self.train_dataset.generate_seeds(total_num_steps=max_step+1)
+        self.model.train()
+        
+        self.logger.info(f"Starting training with profiler for {num_steps} steps from step {current_step+1}.")
+        
+        memory_snapshot = os.path.join(self.log_dir, "memory_snapshot.pickle")
+        
+        
+        token_positions = torch.arange(self.context_length, device=self.device)
+        torch.autograd.set_detect_anomaly(True)
+        
+        for warmup_step in range(10):
+            # Warm-up steps to stabilize the profiler
+            lr_t = learning_rate_scheduler(
+                step=warmup_step,
+                max_lr=self.max_lr,
+                min_lr=self.min_lr,
+                warmup_iters=self.warmup_iters,
+                cosine_cycle_iters=self.cosine_cycle_iters
+            )
+            
+            input_batched_seqs, output_batched_seqs = self.train_dataset(step=warmup_step)
+            
+            kwargs = {
+                "learning_rate": lr_t,
+                "token_positions": token_positions,
+                "max_l2_norm": self.max_l2_norm
+            }
+            
+            run_step(
+                model=self.model,
+                inputs=input_batched_seqs,
+                outputs=output_batched_seqs,
+                optimizer=self.optimizer,
+                enable_backward=True,
+                **kwargs
+            )
+            
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
+        
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=with_stack
+        ) as prof:
+            start_time = time.time()
+            for step in tqdm(range(current_step+1, num_steps+1), desc="Training Steps"):
+                step_start_time = time.time()
+                # Get a batch of data
+                lr_t = learning_rate_scheduler(
+                    step=step,
+                    max_lr=self.max_lr,
+                    min_lr=self.min_lr,
+                    warmup_iters=self.warmup_iters,
+                    cosine_cycle_iters=self.cosine_cycle_iters
+                )
+                
+                # Get a batch of data
+                input_batched_seqs, output_batched_seqs = self.train_dataset(step=step)
+                
+                kwargs = {
+                    "learning_rate": lr_t,
+                    "token_positions": token_positions,
+                    "max_l2_norm": self.max_l2_norm
+                }
+                
+                loss = run_step(
+                    model=self.model,
+                    inputs=input_batched_seqs,
+                    outputs=output_batched_seqs,
+                    optimizer=self.optimizer,
+                    enable_backward=enable_backward,
+                    **kwargs
+                )
+                
+                prof.step()
+                
+                torch.cuda.synchronize()
+                step_end_time = time.time()
+
+                self.logger.info(f"Step {step}")
+                wandb_log = {
+                    "step": step,
+                    "step_time": step_end_time - step_start_time,
+                    "wall_time": step_end_time - start_time
+                }
+        prof.export_chrome_trace(
+            os.path.join(self.log_dir, "profiler_trace.json"),
+            # profile_memory=True,
+            # with_stack=True   
+        )
+        
+        torch.cuda.memory._dump_snapshot(
+            memory_snapshot
+        )
+        torch.cuda.memory._record_memory_history(enabled=None)
+        
+        print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
+        self.logger.info(f"Profiler trace exported to {self.log_dir}/profiler_trace.json")
                 
         
 if __name__ == "__main__":

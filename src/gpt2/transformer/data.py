@@ -54,8 +54,8 @@ def data_loading(
     x = np.array([token_ids[i:i + context_length] for i in starting_indices])
     y = np.array([token_ids[i + 1:i + context_length + 1] for i in starting_indices])
     # Convert to PyTorch tensors and move to the specified device
-    x_tensor = torch.tensor(x, device=device)
-    y_tensor = torch.tensor(y, device=device)
+    x_tensor = torch.tensor(x, device=device, dtype=torch.int64)
+    y_tensor = torch.tensor(y, device=device, dtype=torch.int64)
     return x_tensor, y_tensor
 
 
