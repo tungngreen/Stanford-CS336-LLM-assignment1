@@ -4,10 +4,12 @@ Scaled Dot-Product Attention mechanism for transformer models.
 
 import torch
 import torch.nn as nn
+from torch.autograd import Function
 from torch import Tensor
 from jaxtyping import Float, Int
 from typing import Optional
 from einops import einsum, rearrange
+from math import ceil, sqrt
 
 from gpt2.transformer.linear import Linear
 from gpt2.transformer.embedding import RotaryPositionalEmbedding
@@ -131,6 +133,185 @@ def scaled_dot_product_attention(
     output = torch.einsum('... q k, ... k d -> ... q d', attn_weights, V)
     
     return output
+
+class FlashAttentionTorchFunctionClass(Function):
+    """
+    Custom autograd function for Flash Attention.
+    """
+    
+    @staticmethod
+    def forward(ctx: torch.autograd.function.FunctionCtx,
+                Q: Float[Tensor, " ... queries d_k"],
+                K: Float[Tensor, " ... keys d_k"],
+                V: Float[Tensor, " ... values d_v"],
+                is_causal: bool) -> Float[Tensor, " ... queries d_v"]:
+        """forward method for Flash Attention.
+        This method implements the Flash Attention algorithm, which is a memory-efficient
+        and fast attention mechanism that computes attention in tiles.
+        
+        The forward pass computes the attention output and saves necessary tensors for the backward pass.
+        
+        The algorithm works by:
+        1. Splitting the query, key, and value tensors into smaller tiles.
+        2. Computing attention scores for each tile.
+        3. Applying softmax to the scores to get attention weights.
+        4. Combining the weighted values to produce the final output.
+        5. Saving the log-sum-exp tensor for the backward pass.
+        
+        This implementation is designed to be efficient in terms of memory usage and computation speed,
+        especially for long sequences, by processing the attention in smaller chunks (tiles).
+
+        Parameters
+        -------
+        ctx : Float[Tensor, " ... queries d_v"]
+            Context object to save tensors for backward pass.
+        Q : Float[Tensor, " ... queries d_k"]
+            Query tensor of shape (..., queries, d_k).
+        K : Float[Tensor, " ... keys d_k"]
+            Key tensor of shape (..., keys, d_k).
+        V : Float[Tensor, " ... values d_v"]
+            Value tensor of shape (..., values, d_v).
+        is_causal : bool
+            Whether the attention is causal or not.
+            
+        Returns
+        -------
+        Float[Tensor, " ... queries d_v"]
+            Output tensor after applying Flash Attention.
+            
+        """
+        # Hidden dimensions
+        d_k = Q.shape[-1]
+        d_v = V.shape[-1]
+        
+        # The size of tiles 16-64
+        Bq = 32
+        Bk = 32
+
+        # Number of tiles in Q and K
+        Tq = ceil(Q.shape[-2] / Bq)
+        Tk = ceil(K.shape[-2] / Bk)
+        
+        # Split Q into tiles of size Bq, shape will be (..., Tq, Bq, d_k)
+        Q_tiles = rearrange(Q, '... (tq Bq) d_k -> ... tq Bq d_k', tq=Tq, Bq=Bq)
+        # Split K into tiles of size Bk
+        K_tiles = rearrange(K, '... (tk Bk) d_k -> ... tk Bk d_k', tk=Tk, Bk=Bk)
+        # Split V into tiles of size Bk
+        V_tiles = rearrange(V, "... (tk Bk) d_v -> ... tk Bk d_v", tk=Tk, Bk=Bk)
+        
+        # Initialize lists to hold the output tensors for each tile
+        # O will hold the softmax-weighted output for each query tile, L will hold the log-sum-exp values
+        # O_i will be of shape (..., Bq, d_v) and L_i will be of shape (..., Bq)
+        out_seq = []
+        L = []
+        for i in range(1, Tq+1):
+            # Load Q_i from global memory, shape will be (..., Bq, d_k)
+            Q_i = Q_tiles[..., i-1, :, :]
+
+            # Initialize O_i as a list of tensors to hold the output for each tile
+            # O_i will hold the output for the current query tile, shape will be (..., Bq, d_v)
+            # Initialize with zeros, this is important because we will accumulate the output for each tile
+            # This is similar to initializing a running sum, where we will add the contributions from each key tile.
+            # Q_i_0 is initialized as 0.
+            O_i = []
+            O_i.append(torch.zeros(Q_i.shape[:-1] + (d_v,), device=Q_i.device, dtype=Q_i.dtype))
+            
+            # Inititalize l_i, running proxies for the softmax denominator and will be updated using the unnormalized
+            # softmax values
+            # When we finally write the ouput, we will need to finish normalizing the output by dividing by l_i_Tk,
+            # which is the final value of l_i after processing all Tk tiles.
+            # Shape will be (..., Bq)
+            # l_i will hold the log-sum-exp values for the current query tile, shape will be (..., Bq)
+            # l_i_0 is initialized as 0.
+            l_i = []
+            l_i.append(torch.zeros_like(Q_i[..., 0]))
+
+            # Initialize m_i, row-wise running maximum until the current K-tile as we move right-ward through the tiles
+            # of K^T
+            # We will update m_i_j each new row-wise tile of S as we move wright-ward through the K-tiles.
+            # Using the maximum, we can compute the
+            # unnormalized softmax values. Shape Bq with original value of -inf
+            # m_i will hold the row-wise running maximum for the current query tile, shape will be (..., Bq)
+            m_i = []
+            m_i.append(torch.full(l_i[0].shape, float('-inf'), device=Q_i.device, dtype=Q_i.dtype))
+
+            for j in range(1, Tk+1):
+                # Load K_j and V_j from global memory, shape will be (..., Bk, d_k) and (..., Bk, d_v)
+                K_j = K_tiles[..., j-1, :, :]
+                V_j = V_tiles[..., j-1, :, :]
+                
+                # Compute presoftmax attention scores, shape will be (..., Bq, Bk)
+                S_i_j = torch.einsum('... q d, ... k d -> ... q k', Q_i, K_j) / sqrt(d_k)
+
+                # Compute m_i_j = max(S_i_j, m_i_j-1), shape will be Bq
+                # Each element of m_i[j] will be the maximum of the corresponding ROW in S_i_j and the previous maximum
+                # m_i[j-1]
+                m_i.append(torch.maximum(m_i[j-1], torch.max(S_i_j, dim=-1).values))
+
+                # Compute the unnormalized softmax values, shape will be (..., Bq, Bk)
+                S_i_j_unnorm = torch.exp(S_i_j - rearrange(m_i[j], '... -> ... 1'))
+                
+                # Compute the scale factor for the log-sum-exp, shape will be (..., Bq)
+                # Because we previously shifted the S_i_j by m_i[j-1] so the previous output sequence and L are on a
+                # different scale, we need to compute the scale factor for the current tile.
+                # For instance, S1 = [4.0, 6.0], max is 6.0, exponential is exp(x-6.0). then the new max is 8.0
+                # We must scale the old values down by exp(6.0 - 8.0)
+                scale = torch.exp(m_i[j-1] - m_i[j])
+                
+                # Compute the sum of the unnormalized softmax as we move right-ward through the K tiles,
+                # shape will be (..., Bq)
+                S_i_rowsum = torch.sum(S_i_j_unnorm, dim=-1)
+                
+                # Update the log-sum-exp value for the current tile, shape will be (..., Bq)
+                l_i.append(S_i_rowsum + l_i[j-1] * scale)
+                
+                # Rearrange the scale to match the shape of S_i_j_unnorm for broadcasting
+                # This is necessary to ensure that the scale factor can be applied correctly to the output of the
+                # unnormalized softmax.
+                # The shape will be (..., Bq, 1) so it can be broadcasted to the shape of S_i_j_unnorm
+                scale = rearrange(scale, '... -> ... 1')
+            
+                # rescale the previous output O_i[j-1] by the scale factor
+                O_i_prev_scale = scale * O_i[j-1]
+                
+                # Compute the attention output for this tile, shape will be (..., Bq, d_v)
+                O_i_j = torch.einsum('... q k, ... k d -> ... q d', S_i_j_unnorm, V_j) + O_i_prev_scale
+                O_i.append(O_i_j)
+
+            # After processing all K tiles, we are at the right end of the K tiles, we have the final output.
+            # will be (..., Bq, d_v)
+            O_i_Tk_unnormalized = O_i[-1]
+            
+            # l_i_Tk is the last log-sum-exp value for the current query tile, shape will be (..., Bq)
+            l_i_Tk = l_i[-1]
+
+            # Mormalize the output by dividing by the log-sum-exp value for the current tile
+            # This is the final step to ensure that the output is properly normalized.
+            # The output will be of shape (..., Bq, d_v)
+            O_i_Tk_normalized = O_i_Tk_unnormalized / l_i_Tk.unsqueeze(-1)
+            
+            # Calculate the final log-sum-exp value for the current tile
+            # This is the final value that will be used in the backward pass to compute gradients.
+            # The shape will be (..., Bq)
+            # L_i_out is the final log-sum-exp value for the current query tile, shape will be (..., Bq)
+            L_i_out = m_i[-1] + torch.log(l_i_Tk)
+            
+            # Append the output and log-sum-exp values for the current tile to the lists
+            out_seq.append(O_i_Tk_normalized)
+            L.append(L_i_out)
+
+        # Concatenate the output tiles along the queries dimension
+        out_seq = torch.cat(out_seq, dim=-2)
+        L = torch.cat(L, dim=-1)
+
+        # Reshape the output to match the original query shape
+        # O = rearrange(O, '... tq Bq d_v -> ... (tq Bq) d_v', tq=Tq, Bq=Bq)
+        
+        # Save the log-sum-exp tensor for backward pass
+        ctx.save_for_backward(L, Q, K, V, out_seq)
+
+        return out_seq
+
 
 class MultiheadSelfAttention(nn.Module):
     """MultiheadSelfAttention 
@@ -265,4 +446,5 @@ class MultiheadSelfAttention(nn.Module):
         str
             A string representation of the MultiheadSelfAttention parameters.
         """
-        return f'd_model={self.d_model}, num_heads={self.num_heads}, d_k={self.d_k}, d_v={self.d_v}, device={self.Wq.weight.device}, dtype={self.Wq.weight.dtype}'
+        return f'd_model={self.d_model}, num_heads={self.num_heads}, d_k={self.d_k}, d_v={self.d_v}' + \
+               f'device={self.Wq.weight.device}, dtype={self.Wq.weight.dtype}'

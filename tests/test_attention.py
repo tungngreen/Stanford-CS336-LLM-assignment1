@@ -2,7 +2,7 @@ import pytest
 import torch
 from einops import einsum, rearrange
 
-from .adapters import (
+from adapters import (
     get_flashattention_autograd_function_pytorch,
     get_flashattention_autograd_function_triton,
 )
@@ -102,3 +102,6 @@ def test_flash_backward_triton(is_causal):
     torch.testing.assert_close(dq_expected, q.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dk_expected, k.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dv_expected, v.grad, rtol=1e-2, atol=1e-2)
+    
+if __name__ == "__main__":
+    pytest.main([__file__, "-k", "test_flash_forward_pass_pytorch", "-s"])
