@@ -10,6 +10,8 @@ from jaxtyping import Float, Int
 from typing import Optional
 from einops import einsum, rearrange
 from math import ceil, sqrt
+import triton
+import triton.language as tl
 
 from gpt2.transformer.linear import Linear
 from gpt2.transformer.embedding import RotaryPositionalEmbedding
@@ -312,6 +314,165 @@ class FlashAttentionTorchFunctionClass(Function):
 
         return out_seq
 
+@triton.jit
+def flash_attention_triton_forward_kernel(
+    Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr,
+    stride_qb, stride_qq, stride_qd,
+    stride_kb, stride_kk, stride_kd,
+    stride_vb, stride_vv, stride_vd,
+    stride_ob, stride_oo, stride_od,
+    stride_lb, stride_lq,
+    N_QUERIES, N_KEYS,
+    scale,
+    D: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr
+):
+    query_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+    
+    # Offset each pointer with the corresponding batch index multiplied with the batch stride for each tensor
+    Q_block_ptr = tl.make_block_ptr(
+        Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, D),
+        strides=(stride_qq, stride_qd),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+    
+    K_block_ptr = tl.make_block_ptr(
+        base=K_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, D),
+        strides=(stride_kk, stride_kd),
+        offsets=(0, 0), # We start from (0, 0) because we have to go through all the K tiles for this Q tile
+        block_shape=(K_TILE_SIZE, D),
+        order=(1, 0)
+    )
+    
+    V_block_ptr = tl.make_block_ptr(
+        base=V_ptr + batch_index * stride_vb,
+        shape=(N_KEYS, D),
+        strides=(stride_vv, stride_vd),
+        offsets=(0, 0), # We start from (0, 0) because we have to go through all the V tiles for this Q tile
+        block_shape=(K_TILE_SIZE, D),
+        order=(1, 0)
+    )
+    
+    O_block_ptr = tl.make_block_ptr(
+        base=O_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, D),
+        strides=(stride_oo, stride_od),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0)
+    )
+    
+    # Treating L as a 2D tensor with shape (N_QUERIES, 1) for each batch
+    L_block_ptr = tl.make_block_ptr(
+        base=L_ptr + batch_index * stride_lb,
+        shape=(N_QUERIES, 1),
+        strides=(stride_lq, 0),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, 1),
+        order=(1, 0)
+    )
+    
+    # Initialization
+    output = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
+    log_sum_exp = tl.zeros((Q_TILE_SIZE,1), dtype=tl.float32)
+    m = tl.full((Q_TILE_SIZE, 1), float("-inf"), dtype=tl.float32)
+    
+    # Loading the query tile
+    q_offsets = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+    q_mask = (q_offsets < N_QUERIES)[:, None]  # 1D vector (Q_TILE_SIZE,), True for valid row and False for padding row
+    Q_i = tl.load(Q_block_ptr, mask=q_mask) 
+
+    for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+        
+        # checks, for each row in the current tile, whether its absolute index is less than the total number of keys. 
+        k_offsets = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+        
+        # 1D vector (K_TILE_SIZE), True for valid row and False for padding row
+        # [:, None] converts (K_TILE_SIZE,) into (K_TILE_SIZE, 1)
+        k_mask = (k_offsets < N_KEYS)[:, None] 
+        
+        # tl.arange(0, D) < D: This creates a 1D vector of booleans of length D. Since the head dimension D is always
+        #          fully used, every element in the range 0 to D-1 is less than D. Therefore, this vector is always just
+        # [True, True, ..., True]. It's an "identity mask" that validates all columns.
+        # [None, :] adds a new dimension, converting the 1D vector of shape (D,) into a 2D row vector of shape (1, D)
+        # Operator & combines row and column masks by broadcasting stretching the row mask to columns and vice versa.
+        d_mask = (tl.arange(0, D) < D)[None, :]
+
+        # The final 2D mask is True for positions where both the row and the column are valid.
+        mask = k_mask & d_mask
+        
+        # Loading key and value tiles with the mask
+        # other=0 fills up the invalid with 0.
+        # Each K, V tile should have shape (K_TILE_SIZE, D)
+        K_j = tl.load(K_block_ptr, mask=mask, other=0.0)
+        V_j = tl.load(V_block_ptr, mask=mask, other=0.0)
+
+        # Calculate presoftmax attention scores, shape (Q_TILE_SIZE, K_TILE_SIZE)
+        S_i_j = tl.dot(Q_i, tl.trans(K_j)) * scale
+        
+        # Calculate m_ij by comparing the max of m_i_j-1 (previous tiles) with row max of S_ij (current tile)
+        m_i_j_prev = m
+        m_i_j = tl.max(S_i_j, axis=1, keepdims=True) # Shape (Q_TILE_SIZE, 1)
+        m = tl.maximum(m_i_j, m_i_j_prev)
+        
+        # Compute the unnormalized softmax values
+        # Shape (Q_TILE_SIZE, K_TILE_SIZE)
+        S_i_j_unnorm = tl.exp(S_i_j - m)
+
+        # Compute the scale factor for the log-sum-exp
+        # Shape (Q_TILE_SIZE, 1)
+        scale = tl.exp(m_i_j_prev - m)
+        
+        # Compute sum of the unnormalized softmax as we move right-ward the the K-tiles
+        # Shape (Q_TILE_SIZE, 1)
+        S_i_rowsum = tl.sum(S_i_j_unnorm, axis=1, keepdims=True)
+
+        # Update the log-sum-exp value for the current tile, shape will be (Q_TILE_SIZE, 1)
+        log_sum_exp = log_sum_exp * scale + S_i_rowsum
+
+        # rescale the previous output O_i_j-1 or O_i_prev by the scale factor
+        O_i_prev = output
+        O_i_prev_scale = scale * O_i_prev
+
+        # Compute the attention output for this tile, shape will be (Q_TILE_SIZE, d_v)
+        output = tl.dot(S_i_j_unnorm.to(V_j.dtype), V_j) + O_i_prev_scale
+
+        # Advance the K and V block pointers
+        K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
+        V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
+
+    # After processing all K tiles, output now holds the final attention output at the right-most tile
+
+    # Normalize the output by dividing by the log-sum-exp value for the current tile
+    # This is the final step to ensure that the output is properly normalized.
+    # The output will be of shape (..., Bq, d_v)
+    output = output / log_sum_exp[:, None]
+    tl.store(O_block_ptr, output, mask=q_mask)
+    
+    log_sum_exp = m + tl.log(log_sum_exp)
+    tl.store(L_block_ptr, log_sum_exp, mask=q_mask)
+
+class FlashAttentionTritonFunctionClass(Function):
+    """
+    Custom autograd function for Flash Attention using Triton.
+    This is a placeholder for the Triton implementation.
+    """
+    
+    @staticmethod
+    def forward(ctx: torch.autograd.function.FunctionCtx,
+                Q: Float[Tensor, " ... queries d_k"],
+                K: Float[Tensor, " ... keys d_k"],
+                V: Float[Tensor, " ... values d_v"],
+                is_causal: bool) -> Float[Tensor, " ... queries d_v"]:
+        
+        return
+        
 
 class MultiheadSelfAttention(nn.Module):
     """MultiheadSelfAttention 
