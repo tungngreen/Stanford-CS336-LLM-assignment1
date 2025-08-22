@@ -326,7 +326,8 @@ def flash_attention_triton_forward_kernel(
     scale,
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
-    K_TILE_SIZE: tl.constexpr
+    K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr,
 ):
     query_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
@@ -378,67 +379,63 @@ def flash_attention_triton_forward_kernel(
         order=(1, 0)
     )
     
+    
+
+    
     # Initialization
     output = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
     log_sum_exp = tl.zeros((Q_TILE_SIZE,1), dtype=tl.float32)
     m = tl.full((Q_TILE_SIZE, 1), float("-inf"), dtype=tl.float32)
     
     # Loading the query tile
-    q_offsets = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
-    q_mask = (q_offsets < N_QUERIES)[:, None]  # 1D vector (Q_TILE_SIZE,), True for valid row and False for padding row
-    Q_i = tl.load(Q_block_ptr, mask=q_mask) 
+    Q_i = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")
+    
+    start_q_index = query_tile_index * Q_TILE_SIZE
+    q_indices = tl.arange(0, Q_TILE_SIZE) + start_q_index
+    loop_end = tl.cdiv((start_q_index + Q_TILE_SIZE), K_TILE_SIZE) if is_causal else tl.cdiv(N_KEYS, K_TILE_SIZE)
 
-    for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
-        
-        # checks, for each row in the current tile, whether its absolute index is less than the total number of keys. 
-        k_offsets = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
-        
-        # 1D vector (K_TILE_SIZE), True for valid row and False for padding row
-        # [:, None] converts (K_TILE_SIZE,) into (K_TILE_SIZE, 1)
-        k_mask = (k_offsets < N_KEYS)[:, None] 
-        
-        # tl.arange(0, D) < D: This creates a 1D vector of booleans of length D. Since the head dimension D is always
-        #          fully used, every element in the range 0 to D-1 is less than D. Therefore, this vector is always just
-        # [True, True, ..., True]. It's an "identity mask" that validates all columns.
-        # [None, :] adds a new dimension, converting the 1D vector of shape (D,) into a 2D row vector of shape (1, D)
-        # Operator & combines row and column masks by broadcasting stretching the row mask to columns and vice versa.
-        d_mask = (tl.arange(0, D) < D)[None, :]
-
-        # The final 2D mask is True for positions where both the row and the column are valid.
-        mask = k_mask & d_mask
-        
+    for j in range(loop_end):
         # Loading key and value tiles with the mask
         # other=0 fills up the invalid with 0.
         # Each K, V tile should have shape (K_TILE_SIZE, D)
-        K_j = tl.load(K_block_ptr, mask=mask, other=0.0)
-        V_j = tl.load(V_block_ptr, mask=mask, other=0.0)
-
+        K_j = tl.load(K_block_ptr, boundary_check=(0,), padding_option="zero")
+        V_j = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero")
+        
         # Calculate presoftmax attention scores, shape (Q_TILE_SIZE, K_TILE_SIZE)
         S_i_j = tl.dot(Q_i, tl.trans(K_j)) * scale
         
+        if is_causal:
+            k_indices = tl.arange(0, K_TILE_SIZE) + j * K_TILE_SIZE
+            
+            causal_mask = q_indices[:, None] >= k_indices[None, :]
+            
+            # Apply the causal mask to the attention scores
+            # For elements that are masked out, we will set them to a large negative value
+            S_i_j = tl.where(causal_mask, S_i_j, -1e6)
+
         # Calculate m_ij by comparing the max of m_i_j-1 (previous tiles) with row max of S_ij (current tile)
         m_i_j_prev = m
-        m_i_j = tl.max(S_i_j, axis=1, keepdims=True) # Shape (Q_TILE_SIZE, 1)
+        m_i_j = tl.max(S_i_j, axis=1, keep_dims=True) # Shape (Q_TILE_SIZE, 1)
         m = tl.maximum(m_i_j, m_i_j_prev)
         
         # Compute the unnormalized softmax values
-        # Shape (Q_TILE_SIZE, K_TILE_SIZE)
+        # Shape (Q_TILE_SIZE, K_TILE_SIZE, 1)
         S_i_j_unnorm = tl.exp(S_i_j - m)
 
         # Compute the scale factor for the log-sum-exp
         # Shape (Q_TILE_SIZE, 1)
-        scale = tl.exp(m_i_j_prev - m)
+        scale_factor = tl.exp(m_i_j_prev - m)
         
         # Compute sum of the unnormalized softmax as we move right-ward the the K-tiles
         # Shape (Q_TILE_SIZE, 1)
-        S_i_rowsum = tl.sum(S_i_j_unnorm, axis=1, keepdims=True)
+        S_i_rowsum = tl.sum(S_i_j_unnorm, axis=1, keep_dims=True)
 
         # Update the log-sum-exp value for the current tile, shape will be (Q_TILE_SIZE, 1)
-        log_sum_exp = log_sum_exp * scale + S_i_rowsum
+        log_sum_exp = log_sum_exp * scale_factor + S_i_rowsum
 
         # rescale the previous output O_i_j-1 or O_i_prev by the scale factor
         O_i_prev = output
-        O_i_prev_scale = scale * O_i_prev
+        O_i_prev_scale = scale_factor * O_i_prev
 
         # Compute the attention output for this tile, shape will be (Q_TILE_SIZE, d_v)
         output = tl.dot(S_i_j_unnorm.to(V_j.dtype), V_j) + O_i_prev_scale
@@ -452,11 +449,11 @@ def flash_attention_triton_forward_kernel(
     # Normalize the output by dividing by the log-sum-exp value for the current tile
     # This is the final step to ensure that the output is properly normalized.
     # The output will be of shape (..., Bq, d_v)
-    output = output / log_sum_exp[:, None]
-    tl.store(O_block_ptr, output, mask=q_mask)
-    
+    output = output / log_sum_exp
+    tl.store(O_block_ptr, output, boundary_check=(0,))
+
     log_sum_exp = m + tl.log(log_sum_exp)
-    tl.store(L_block_ptr, log_sum_exp, mask=q_mask)
+    tl.store(L_block_ptr, log_sum_exp, boundary_check=(0,))
 
 class FlashAttentionTritonFunctionClass(Function):
     """
@@ -466,13 +463,99 @@ class FlashAttentionTritonFunctionClass(Function):
     
     @staticmethod
     def forward(ctx: torch.autograd.function.FunctionCtx,
-                Q: Float[Tensor, " ... queries d_k"],
+                Q: Float[Tensor, " ... queries d_k"], # (B, N_QUERIES, D)
                 K: Float[Tensor, " ... keys d_k"],
                 V: Float[Tensor, " ... values d_v"],
                 is_causal: bool) -> Float[Tensor, " ... queries d_v"]:
+        """forward sets up the launch grid for the forward pass of Triton kernel of Flash Attention
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            The context for the autograd function.
+        Q : Float[Tensor, " ... queries d_k"]
+            The query tensor.
+        K : Float[Tensor, " ... keys d_k"]
+            The key tensor.
+        V : Float[Tensor, " ... values d_v"]
+            The value tensor.
+        is_causal : bool
+            Whether the attention is causal (i.e., autoregressive).
+
+        Returns
+        -------
+        Float[Tensor, " ... queries d_v"]
+            The output tensor after applying attention.
+        """
         
-        return
+        # Determine the batch size and number of heads
+        B = Q.shape[0]
+
+        # Determine the last dimension (D) which is the feature/embedding dimension
+        D = Q.shape[-1]
         
+        # Determine the number of queries and key
+        N_QUERIES = Q.shape[-2]
+        N_KEYS = K.shape[-2]
+        
+        # Set the tile sizes
+        Q_TILE_SIZE = 32
+        K_TILE_SIZE = 32
+        
+        # Compute the strides for query tiles
+        stride_qb = Q.stride(0)
+        stride_qq = Q.stride(1)
+        stride_qd = Q.stride(2)
+
+        # Compute the strides for key tiles
+        stride_kb = K.stride(0)
+        stride_kk = K.stride(1)
+        stride_kd = K.stride(2)
+
+        # Compute the strides for value tiles
+        stride_vb = V.stride(0)
+        stride_vv = V.stride(1)
+        stride_vd = V.stride(2)
+
+        # Initialize the output and log_sum_exp
+        output = torch.empty_like(Q, dtype=Q.dtype).cuda()
+        log_sum_exp = torch.empty((Q.shape[0], N_QUERIES), dtype=Q.dtype).cuda()
+
+        # Compute the strides for output tiles
+        stride_ob = output.stride(0)
+        stride_oo = output.stride(1)
+        stride_od = output.stride(2)
+
+        # Compute the strides for log_sum_exp
+        stride_lb = log_sum_exp.stride(0)
+        stride_lq = log_sum_exp.stride(1)
+
+
+        # Setting up the launch grid for all the kernels
+        grid = (triton.cdiv(N_QUERIES, Q_TILE_SIZE), Q.shape[0])  # (number of query tiles, number of batches * heads)
+        
+        flash_attention_triton_forward_kernel[grid](
+            Q, K, V, output, log_sum_exp,
+            stride_qb=stride_qb, stride_qq=stride_qq, stride_qd=stride_qd,
+            stride_kb=stride_kb, stride_kk=stride_kk, stride_kd=stride_kd,
+            stride_vb=stride_vb, stride_vv=stride_vv, stride_vd=stride_vd,
+            stride_ob=stride_ob, stride_oo=stride_oo, stride_od=stride_od,
+            stride_lb=stride_lb, stride_lq=stride_lq,
+            N_QUERIES=N_QUERIES, N_KEYS=N_KEYS,
+            scale=1.0 / sqrt(D),
+            D=D,
+            Q_TILE_SIZE=Q_TILE_SIZE,
+            K_TILE_SIZE=K_TILE_SIZE,
+            is_causal=is_causal
+        )
+        
+        ctx.save_for_backward(log_sum_exp, Q, K, V, output, is_causal)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        raise NotImplementedError("Backward pass is not implemented.")
 
 class MultiheadSelfAttention(nn.Module):
     """MultiheadSelfAttention 

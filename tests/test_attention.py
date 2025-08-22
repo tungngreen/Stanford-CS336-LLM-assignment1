@@ -104,4 +104,6 @@ def test_flash_backward_triton(is_causal):
     torch.testing.assert_close(dv_expected, v.grad, rtol=1e-2, atol=1e-2)
     
 if __name__ == "__main__":
-    pytest.main([__file__, "-k", "test_flash_forward_pass_pytorch", "-s"])
+    # pytest.main([__file__, "-k", "test_flash_forward_pass_pytorch", "-s"])
+
+    pytest.main([__file__, "-k", "test_flash_forward_pass_triton", "-s"])
