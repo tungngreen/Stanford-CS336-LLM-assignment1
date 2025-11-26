@@ -313,6 +313,94 @@ class FlashAttentionTorchFunctionClass(Function):
         ctx.save_for_backward(L, Q, K, V, out_seq)
 
         return out_seq
+    
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        Q: Float[Tensor, " ... queries d_k"],
+        K: Float[Tensor, " ... keys d_k"],
+        V: Float[Tensor, " ... values d_v"],
+        Out: Float[Tensor, " ... queries d_v"],
+        d_out: Float[Tensor, " ... queries d_v"],
+        L: Float[Tensor, " ... queries"],
+    ):
+        """backward pass for the Flash Attention function.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            Context object for the backward pass.
+        Q : Float[Tensor, &quot; ... queries d_k]
+            Query tensor.
+        K : Float[Tensor, &quot; ... keys d_k]
+            Key tensor.
+        V : Float[Tensor, &quot; ... values d_v&quot;]
+            Value tensor.
+        d_out : Float[Tensor, &quot; ... queries d_v&quot;]
+            Gradient of the output tensor.
+        L : Float[Tensor, &quot; ... queries&quot;]
+            Log-sum-exp tensor.
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        
+        # Hidden dimensions
+        d_k = Q.shape[-1]
+        d_v = V.shape[-1]
+        
+        # The size of tiles 16-64
+        Bq = 32
+        Bk = 32
+        
+        # Number of tiles in Q and K
+        Tq = ceil(Q.shape[-2] / Bq)
+        Tk = ceil(K.shape[-2] / Bk)
+        
+        # Split Q into tiles of size Bq, shape will be (..., Tq, Bq, d_k)
+        Q_tiles = rearrange(Q, '... (tq Bq) d_k -> ... tq Bq d_k', tq=Tq, Bq=Bq)
+        # Split K into tiles of size (Bk, d_k)
+        K_tiles = rearrange(K, '... (tk Bk) d_k -> ... tk Bk d_k', tk=Tk, Bk=Bk)
+        # Split V into tiles of size (Bk, d_v)
+        V_tiles = rearrange(V, "... (tk Bk) d_v -> ... tk Bk d_v", tk=Tk, Bk=Bk)
+        # Split d_out into tiles of size (Bq, d_v)
+        d_out_tiles = rearrange(d_out, '... (tq Bq) d_v -> ... tq Bq d_v', tq=Tq, Bq=Bq)
+        # Split L into tiles of size Bq
+        L_tiles = rearrange(L, '... (tq Bq) -> ... tq Bq', tq=Tq, Bq=Bq)
+
+        # Initialize lists to hold the gradient tensors
+        # WQ is of shape (d_model, d_k)
+        dQ_tiles = []
+        # WK is of shape (d_model, d_k), so each tile will also be of shape (Bk, d_k)
+        dK_tiles = []
+        # WV is of shape (d_model, d_v), so each tile will also be of shape (Bk, d_v)
+        dV_tiles = []
+        for i in range(1, Tq+1):
+            # Load Q_i from global memory, shape will be (..., Bq, d_k)
+            Q_i = Q_tiles[..., i-1, :, :]
+            
+            L_i = L_tiles[..., i-1, :]
+            
+            d_out_i = d_out_tiles[..., i-1, :, :]
+
+            for j in range(1, Tk+1):
+                K_j = K_tiles[..., j-1, :, :]
+                V_j = V_tiles[..., j-1, :, :]
+                
+                S_i_j = torch.einsum('... q d, ... k d -> ... q k', Q_i, K_j) / sqrt(d_k)
+                
+                P_i_j = torch.exp(S_i_j - rearrange(L_i, '... -> ... 1'))
+
+                dV_j = torch.einsum('... q k, ... q d -> ... k d', P_i_j, V_j)
+
+                dP_i_j = torch.einsum('... q k, ... q d -> ... k d', P_i_j, d_out_i)
+
+                dK += torch.einsum('... q k, ... q d -> ... k d', dP_i_j, K_j)
+                dV += torch.einsum('... q k, ... q d -> ... k d', dP_i_j, V_j)
+                
+
 
 @triton.jit
 def flash_attention_triton_forward_kernel(
